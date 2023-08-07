@@ -1,21 +1,23 @@
 # services.flatpak.**packages**
 ## Default
 ```nix
-null
+[]
 ```
 ## Example
 ```nix
-[ "flathub:org.kde.index//stable" "flathub-beta:org.kde.kdenlive/x86_64/stable" ]
+[ "flathub:app/org.kde.index//stable" "flathub-beta:app/org.kde.kdenlive/x86_64/stable" ]
+
+# out-of-tree flatpaks can be installed like this (note: they can't be a URL because flatpak doesn't like that)
+[ ":${./foobar.flatpak}" "flathub:/root/testflatpak.flatpakref" ]
 ```
 ## Description
 Which packages to install.
 
-Use this format: `<remote name>:<flatpak ref>/<arch>/<branch>`
+Use this format: `<remote name>:<type>/<flatpak ref>/<arch>/<branch>`
 
+`<type>` needs to be one of "app" or "runtime"
 `<arch>` may be omitted, but the slash needs to be kept.
 `<remote name>` is subject to the remote naming constraints.
-
-If left at the default value, nothing will be done.
 
 # services.flatpak.**preInitCommand**
 ## Description
@@ -31,7 +33,7 @@ If left at the default value, nothing will be done.
 # services.flatpak.**remotes**
 ## Default
 ```nix
-null
+{}
 ```
 ## Example
 ```nix
@@ -45,4 +47,8 @@ Declare flatpak remotes.
 
 May only contain uppercase and lowercase ASCII characters and hyphens.
 
-If left at the default value, nothing will be done.
+# Note on overrides:
+
+If you want to apply overrides, do so by running commands via postInitCommand
+
+Eventually I will figure out a way to do overrides declaratively, but this will do

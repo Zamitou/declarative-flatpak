@@ -3,13 +3,21 @@
 
   services.flatpak = {
     packages = [
-      "flathub-beta:org.mozilla.firefox//stable"
-      "flathub:org.kde.index//stable"
-      "flathub:org.freedesktop.Platform.VulkanLayer.MangoHud//21.08"
+      "flathub:runtime/org.freedesktop.Platform.VulkanLayer.MangoHud//21.08"
+      "flathub:runtime/org.freedesktop.Platform.VulkanLayer.vkBasalt//21.08"
+      "flathub:app/org.kde.index//stable"
+      
+      "flathub-beta:app/org.mozilla.firefox//stable"
+      
+      "launcher-moe:app/moe.launcher.honkers-launcher/x86_64/master"
+
+      "flathub:${./io.gitlab.daikhan.stable.flatpakref}"
+      ":${./xwaylandvideobridge.flatpak}"
     ];
     remotes = {
       "flathub" = "https://flathub.org/repo/flathub.flatpakrepo";
       "flathub-beta" = "https://flathub.org/beta-repo/flathub-beta.flatpakrepo";
+      "launcher-moe" = "https://gol.launcher.moe/gol.launcher.moe.flatpakrepo";
     };
   };
 
@@ -18,6 +26,28 @@
     memorySize = 8096 * 2;
     diskSize = 10 * 1024;
   };
+
+  # Dev env stuff
+  environment.loginShellInit = ''
+    trap 'sudo poweroff' EXIT
+  '';
+  #virtualisation.sharedDirectories = {
+  #  "source" = {
+  #    target = "/src";
+  #    source = "/tmp/flatpak-module-dev";
+  #  };
+  #};
+  #systemd.paths."hot-reload" = {
+  #  pathConfig = {
+  #    "PathModified" = "/src";
+  #    "Unit" = [ "hot-restart.service" ];
+  #  };
+  #};
+  #systemd.services."hot-restart" = {
+  #  script = ''
+  #    systemctl poweroff
+  #  '';
+  #};
 
   security.sudo = {
     enable = true;
@@ -37,9 +67,9 @@
     mountNixProfile = false;
   };
 
-  environment.loginShellInit = ''
-    trap 'sudo poweroff' EXIT
-  '';
+  environment.systemPackages = with pkgs; [
+    tmux
+  ];
 
   networking.networkmanager.enable = true;
 
@@ -70,9 +100,9 @@
 
     services.flatpak = {
       packages = [
-        "flathub:de.shorsh.discord-screenaudio//stable"
-        "flathub-beta:org.chromium.Chromium//beta"
-        "flathub:com.usebottles.bottles//stable"
+        "flathub:app/de.shorsh.discord-screenaudio//stable"
+        # "flathub-beta:app/org.chromium.Chromium//beta"
+        # "flathub:app/com.usebottles.bottles//stable"
       ];
       remotes = {
         "flathub" = "https://flathub.org/repo/flathub.flatpakrepo";

@@ -18,7 +18,7 @@
       Service = {
         ExecStart = "${import ../script.nix {
           inherit config lib pkgs;
-          is-system-install = false;
+          is-system-install = true;
         }}";
       };
     };

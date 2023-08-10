@@ -2,7 +2,7 @@
   description = "Global FHS environment for your daily computing needs.";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-22.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-23.05";
     utils.url = "github:numtide/flake-utils";
   };
 
@@ -40,7 +40,7 @@
             printf "\rDone\033[0K\n"
           }
           '
-          nixos-shell --flake .#
+          nixos-shell --flake .# -I nixpkgs=${nixpkgs}
           popd &>/dev/null
         }
         
@@ -53,17 +53,20 @@
         test-vm
       '';
     in pkgs.mkShell {
-      NIX_PATH="nixpkgs=${nixpkgs}";
       packages = with pkgs; [
         nixos-shell
         ncurses
+        ostree
         script
         gawk
         jq
       ];
       shellHook = ''
+        # ln -sfT $(pwd) /tmp/flatpak-module-dev
+        
         echo -e "\033[31mRun test-vm to test your code\033[0m"
       '';
+      NIX_PATH="nixpkgs=${nixpkgs}";
     };
   }) // {
     nixosModules = rec {

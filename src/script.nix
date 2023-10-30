@@ -9,7 +9,11 @@ let
 in
 
 pkgs.writeShellScript "setup-flatpaks" ''
-  export PATH=${lib.makeBinPath (with pkgs; [ coreutils inetutils gnugrep flatpak gawk rsync ostree mktemp ])}:$PATH
+  ${if cfg.enable-debug then ''
+  set -v
+  '' else ""}
+  
+  export PATH=${lib.makeBinPath (with pkgs; [ coreutils util-linux inetutils gnugrep flatpak gawk rsync ostree systemd findutils gnused diffutils ])}
   
   until ping -c1 github.com &>/dev/null; do echo x; sleep 1; done | awk '
   {
@@ -22,108 +26,166 @@ pkgs.writeShellScript "setup-flatpaks" ''
 
   set -eu
 
+  export LANG=C
+
   ${if is-system-install then ''
-  export TMPDIR=/var/cache/flatpak-module
+  export MODULE_DATA_ROOT=/var/lib/flatpak-module
+  export FLATPAK_DIR=/var/lib/flatpak
   '' else ''
-  export TMPDIR=${config.xdg.cacheHome}/flatpak-module
+  export MODULE_DATA_ROOT=${config.xdg.stateHome}/flatpak-module
+  export FLATPAK_DIR=${config.xdg.dataHome}/flatpak
   ''}
-  rm -rf $TMPDIR
-  mkdir -pm 700 $TMPDIR
-  export FLATPAK_USER_DIR=$TMPDIR
-  export FLATPAK_SYSTEM_DIR=$TMPDIR
+  
+  # Now do some overrides
+  ${if cfg.state-dir != null then ''
+  export MODULE_DATA_ROOT=${cfg.state-dir}
+  '' else ""}
+  ${if cfg.target-dir != null then ''
+  export FLATPAK_DIR=${cfg.target-dir}
+  '' else ""}
+
+  CURR_BOOTID=$(journalctl --list-boots --no-pager | grep -E '^ +0' | awk '{print$2}') || \
+    CURR_BOOTID=1
+
+  ACTIVE_DIR=$(cat $MODULE_DATA_ROOT/active 2>/dev/null) || \
+    ACTIVE_DIR=$MODULE_DATA_ROOT/boot/2/1
+  TARGET_DIR=$MODULE_DATA_ROOT/boot/$CURR_BOOTID/$(uuidgen)
+  INSTALL_TRASH_DIR=$MODULE_DATA_ROOT/boot/0/$(uuidgen)
+
+  if [ -d $MODULE_DATA_ROOT/boot ]; then
+    [ -e $ACTIVE_DIR ] && \
+      echo "$CURR_BOOTID" >$ACTIVE_DIR/keep
+    
+    echo Cleaning old directories
+    find $MODULE_DATA_ROOT/boot -type d -mindepth 2 -maxdepth 2 \
+      -not -exec test -e {}/keep \; -exec rm -rf {} \; \
+      -o -not -exec grep "$CURR_BOOTID" {}/keep &>/dev/null \; -exec rm -rf {} \;
+    rmdir $MODULE_DATA_ROOT/boot/* 2>/dev/null || true
+  fi
+  
+  echo "Running with boot ID $CURR_BOOTID"
+  echo "An installation will be created at \"$TARGET_DIR\""
+  mkdir -pm 755 $TARGET_DIR
+  mkdir -pm 755 $INSTALL_TRASH_DIR
 
   ${cfg.preInitCommand}
 
-  ${if builtins.length (builtins.attrValues cfg.remotes) == 0 then ''
-  echo "No remotes declared in config. Refusing to do anything."
-  exit 0
-  '' else builtins.toString (builtins.attrValues (builtins.mapAttrs (name: value: ''
-  echo "Adding remote ${name} with URL ${value}"
-  flatpak ${builtins.toString fargs} remote-add --if-not-exists ${name} ${value}
-  '') cfg.remotes))}
+  export FLATPAK_USER_DIR=$TARGET_DIR/data
+  export FLATPAK_SYSTEM_DIR=$TARGET_DIR/data
 
-  for i in ${builtins.toString (builtins.filter (x: builtins.match ".+${regex.ffile}$" x == null) cfg.packages)}; do
-    _remote=$(grep -Eo '^${regex.fremote}' <<< $i)
-    _id=$(grep -Eo '${regex.ftype}\/${regex.fref}\/${regex.farch}\/${regex.fbranch}(:${regex.fcommit})?' <<< $i)
-    _commit=$(grep -Eo ':${regex.fcommit}$' <<< $_id) || true
-    if [ -n "$_commit" ]; then
-      _commit=$(tail -c-$(($(wc -c <<< $_commit) - 1)) <<< $_commit)
-      _id=$(head -c-$(($(wc -c <<< $_commit) + 1)) <<< $_id)
-    fi
+  if ${if cfg.recycle-generation then "true" else "false"} && [ -e $ACTIVE_DIR/config ] &&  cmp -s $ACTIVE_DIR/config ${pkgs.writeText "flatpak-gen-config" (builtins.toJSON cfg)}; then
+    echo "Re-using the current environment"
 
-    # echo F $i
-    # echo R $_remote
-    # echo C $_commit
-    # echo I $_id
+    rsync -a $ACTIVE_DIR/ $TARGET_DIR/
+    rm -f $TARGET_DIR/config
 
-    flatpak ${builtins.toString fargs} install --noninteractive --no-auto-pin $_remote $_id
+    flatpak ${builtins.toString fargs} update -y --noninteractive
 
-    if [ -n "$_commit" ]; then
-      flatpak update --commit="$_commit" $_id || echo "failed to update to commit \"$_commit\". Check if the commit is long enough"
-    fi
-  done
+    # WARNING: PINNING IS BROKEN
 
-  echo "Installing out-of-tree refs"
-  for i in ${builtins.toString (builtins.filter (x: builtins.match ":.+\.flatpak$" x != null) cfg.packages)}; do
-    _id=$(grep -Eo ':.+\.flatpak$' <<< $i | tail -c+2)
+    flatpak uninstall -y --noninteractive --unused || echo "For some reason the uninstall step failed. Here be dragons..."
+  else
+    ${if builtins.length (builtins.attrValues cfg.remotes) == 0 then ''
+    echo "No remotes declared in config. Refusing to do anything."
+    exit 0
+    '' else builtins.toString (builtins.attrValues (builtins.mapAttrs (name: value: ''
+    echo "Adding remote ${name} with URL ${value}"
+    flatpak ${builtins.toString fargs} remote-add --if-not-exists ${name} ${value}
+    '') cfg.remotes))}
 
-    flatpak ${builtins.toString fargs} install --noninteractive --no-auto-pin $_id
-  done
-  for i in ${builtins.toString (builtins.filter (x: builtins.match ":.+\.flatpakref$" x != null) cfg.packages)}; do
-    _remote=$(grep -Eo '^${regex.fremote}:' <<< $i | head -c-2)
-    _id=$(grep -Eo ':.+\.flatpakref$' <<< $i | tail -c+2)
+    for i in ${builtins.toString (builtins.filter (x: builtins.match ".+${regex.ffile}$" x == null) cfg.packages)}; do
+      _remote=$(grep -Eo '^${regex.fremote}' <<< $i)
+      _id=$(grep -Eo '${regex.ftype}\/${regex.fref}\/${regex.farch}\/${regex.fbranch}(:${regex.fcommit})?' <<< $i)
+      _commit=$(grep -Eo ':${regex.fcommit}$' <<< $_id) || true
+      if [ -n "$_commit" ]; then
+        _commit=$(tail -c-$(($(wc -c <<< $_commit) - 1)) <<< $_commit)
+        _id=$(head -c-$(($(wc -c <<< $_commit) + 1)) <<< $_id)
+      fi
 
-    flatpak ${builtins.toString fargs} install --noninteractive --no-auto-pin $_remote $_id
-  done
+      # echo R $_remote
+      # echo C $_commit
+      # echo I $_id
 
-  # install overrides
-  mkdir -p $TMPDIR/overrides
-  ${builtins.concatStringsSep "\n" (builtins.map (overridename: let
-    overridevalue = cfg.overrides.${overridename};
-  in ''
-  echo "Installing override for ${overridename}"
-  cat << EOF >$TMPDIR/overrides/${overridename}
+      flatpak ${builtins.toString fargs} install --noninteractive --no-auto-pin $_remote $_id
+
+      if [ -n "$_commit" ]; then
+        flatpak update --commit="$_commit" $_id || echo "failed to update to commit \"$_commit\". Check if the commit is correct - $_id"
+      fi
+    done
+
+    echo "Installing out-of-tree refs"
+    for i in ${builtins.toString (builtins.filter (x: builtins.match ":.+\.flatpak$" x != null) cfg.packages)}; do
+      _id=$(grep -Eo ':.+\.flatpak$' <<< $i | tail -c+2)
+
+      flatpak ${builtins.toString fargs} install --noninteractive --no-auto-pin $_id
+    done
+    for i in ${builtins.toString (builtins.filter (x: builtins.match ":.+\.flatpakref$" x != null) cfg.packages)}; do
+      _remote=$(grep -Eo '^${regex.fremote}:' <<< $i | head -c-2)
+      _id=$(grep -Eo ':.+\.flatpakref$' <<< $i | tail -c+2)
+
+      flatpak ${builtins.toString fargs} install --noninteractive --no-auto-pin $_remote $_id
+    done
+  fi
   
-  [Context]
-  ${if overridevalue.filesystems != null then ''
-  filesystems=${builtins.concatStringsSep ";" overridevalue.filesystems}
-  '' else ""}
-  ${if overridevalue.sockets != null then ''
-  sockets=${builtins.concatStringsSep ";" overridevalue.sockets}
-  '' else ""}
+  ${if cfg.deduplicate then ''
+  # Deduplicate
+  if [ -d $ACTIVE_DIR/data ]; then
+    echo "Deduplicating"
+    pushd $ACTIVE_DIR/data &>/dev/null
+    find . -type f | while read r; do
+      if cmp -s $ACTIVE_DIR/data/$r $TARGET_DIR/data/$r; then
+        ln -f $ACTIVE_DIR/data/$r $TARGET_DIR/data/$r
+        echo "$r deduplicated"
+      fi
+    done
+    popd &>/dev/null
+  fi
+  '' else "# Deduplication would have happened here"}
 
-  [Environment]
-  ${if overridevalue.environment != null then ''
-  ${builtins.concatStringsSep ";" (builtins.map (envname: let
-    envvalue = overridevalue.environment.${envname};
-  in ''
-  ${envname}=${builtins.toString envvalue}
-  '') (builtins.attrNames (overridevalue.environment or [])))}
-  '' else ""}
-
-  EOF
+  echo "Installing files"
+  
+  # Move the current "installation" into the bin
+  [ -d $FLATPAK_DIR ] && mv $FLATPAK_DIR/* $INSTALL_TRASH_DIR || true
+  rm -rf $FLATPAK_DIR || echo "WARNING: Could not delete $FLATPAK_DIR"
+  mkdir -pm 755 $FLATPAK_DIR
+  
+  # Then try to recover state data
+  rm -rf $FLATPAK_DIR/db
+  [ -d $INSTALL_TRASH_DIR/db ] && mv $INSTALL_TRASH_DIR/db $FLATPAK_DIR/db
+  
+  # Install overrides
+  rm -rf $TARGET_DIR/data/overrides
+  mkdir -p $TARGET_DIR/data/overrides
+  ${builtins.concatStringsSep "\n" (builtins.map (ref: ''
+  cat ${pkgs.callPackage ./pkgs/overrides.nix { inherit cfg ref; }} >$TARGET_DIR/data/overrides/${ref}
   '') (builtins.attrNames cfg.overrides))}
-
-  ${if is-system-install then ''
-  if [ -d /var/lib/flatpak ]; then
-    for i in db; do
-      rm -rf $TMPDIR/$i
-      [ -d /var/lib/flatpak/$i ] && cp -a /var/lib/flatpak/$i $TMPDIR/$i
-    done
-    mv /var/lib/flatpak $(mktemp -d flatpak-module-system-old.XXXXXX -p /tmp)
-  fi
-  chmod 755 $TMPDIR
-  mv $TMPDIR /var/lib/flatpak
-  '' else ''
-  if [ -d ${config.xdg.dataHome}/flatpak ]; then
-    for i in db; do
-      rm -rf $TMPDIR/$i
-      [ -d ${config.xdg.dataHome}/flatpak/$i ] && cp -a ${config.xdg.dataHome}/flatpak/$i $TMPDIR/$i
-    done
-    mv ${config.xdg.dataHome}/flatpak $(mktemp -d flatpak-module-user-old-$USER.XXXXXX -p /tmp)
-  fi
-  mv $TMPDIR ${config.xdg.dataHome}/flatpak
-  ''}
   
+  # First, make sure we didn't accidentally copy over the exports
+  rm -rf $TARGET_DIR/data/processed-exports
+  
+  # Dereference because exports are symlinks by default
+  [ -d $TARGET_DIR/data/exports ] && rsync -aL $TARGET_DIR/data/exports/ $TARGET_DIR/data/processed-exports
+  
+  # Then begin "processing" the exports to make them point to the correct locations
+  [ -d $TARGET_DIR/data/processed-exports/bin ] && \
+    find $TARGET_DIR/data/processed-exports/bin \
+      -type f -exec sed -i "s,exec flatpak run,FLATPAK_USER_DIR=$TARGET_DIR/data FLATPAK_SYSTEM_DIR=$TARGET_DIR/data exec flatpak run,gm" '{}' \;
+  [ -d $TARGET_DIR/data/processed-exports/share/applications ] && \
+    find $TARGET_DIR/data/processed-exports/share/applications \
+      -type f -exec sed -i "s,Exec=flatpak run,Exec=env FLATPAK_USER_DIR=$TARGET_DIR/data FLATPAK_SYSTEM_DIR=$TARGET_DIR/data flatpak run,gm" '{}' \;
+  
+  # Now clone the modified exports over
+  [ -d $TARGET_DIR/data/processed-exports ] && rsync -aL $TARGET_DIR/data/processed-exports/ $FLATPAK_DIR/exports
+
+  # Create some symlinks to allow the user to mutate their environment
+  for i in repo runtime app overrides; do
+    [ -e $TARGET_DIR/data/$i ] && ln -s $TARGET_DIR/data/$i $FLATPAK_DIR/$i
+  done
+
+  unset FLATPAK_USER_DIR FLATPAK_SYSTEM_DIR
+
   ${cfg.postInitCommand}
+
+  echo $TARGET_DIR  >$MODULE_DATA_ROOT/active
+  ln -sfT ${pkgs.writeText "flatpak-gen-config" (builtins.toJSON cfg)} $TARGET_DIR/config
 ''
